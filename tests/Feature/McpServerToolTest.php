@@ -1,0 +1,43 @@
+<?php
+
+use Ugarit\Ai\Contracts\Agent;
+use Ugarit\Ai\Contracts\HasTools;
+use Ugarit\Ai\Promptable;
+use Ugarit\Ai\Responses\Data\ToolCall;
+use Tests\Fixtures\Mcp\FakeMcpServerTool;
+
+test('agents can return mcp server tools directly', function (): void {
+    $serverTool = new FakeMcpServerTool;
+
+    $agent = new class($serverTool) implements Agent, HasTools
+    {
+        use Promptable;
+
+        public function __construct(public object $tool) {}
+
+        public function instructions(): string
+        {
+            return 'Use available tools.';
+        }
+
+        public function tools(): iterable
+        {
+            return [$this->tool];
+        }
+    };
+
+    $agent::fake([
+        new ToolCall('call_123', 'fake-mcp-server-tool', ['city' => 'Paris']),
+        'Done.',
+    ]);
+
+    $response = $agent->prompt('What is the weather in Paris?');
+
+    expect($response)
+        ->toolCalls->toHaveCount(1)
+        ->toolResults->toHaveCount(1);
+
+    expect($response->toolResults->first())->toHaveProperty('result', 'Sunny in Paris.');
+
+    expect($serverTool->invocations)->toBe([['city' => 'Paris']]);
+});

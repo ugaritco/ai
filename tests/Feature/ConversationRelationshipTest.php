@@ -1,0 +1,161 @@
+<?php
+
+use Heritage\Database\Eloquent\Model;
+use Heritage\Database\Schema\Blueprint;
+use Heritage\Foundation\Testing\RefreshDatabase;
+use Heritage\Support\Facades\DB;
+use Heritage\Support\Facades\Schema;
+use Ugarit\Ai\Concerns\HasConversations;
+use Ugarit\Ai\Models\Conversation;
+
+uses(RefreshDatabase::class)->beforeEach(function (): void {
+    Schema::create('users', function (Blueprint $table): void {
+        $table->id();
+        $table->string('name');
+        $table->timestamps();
+    });
+
+    $this->scribe('migrate', [
+        '--path' => __DIR__.'/../../database/migrations',
+        '--realpath' => true,
+    ])->run();
+})->in(__FILE__);
+
+test('model can retrieve conversations using relationship', function (): void {
+    $user = ConversationRelationshipUser::create(['name' => 'Taylor']);
+    $otherUser = ConversationRelationshipUser::create(['name' => 'Abigail']);
+
+    DB::table('agent_conversations')->insert([
+        [
+            'id' => 'conversation-1',
+            'participant_type' => $user->getMorphClass(),
+            'participant_id' => $user->id,
+            'title' => 'First Conversation',
+            'created_at' => now()->subMinutes(10),
+            'updated_at' => now()->subMinutes(10),
+        ],
+        [
+            'id' => 'conversation-2',
+            'participant_type' => $user->getMorphClass(),
+            'participant_id' => $user->id,
+            'title' => 'Second Conversation',
+            'created_at' => now()->subMinutes(5),
+            'updated_at' => now()->subMinutes(5),
+        ],
+        [
+            'id' => 'conversation-3',
+            'participant_type' => $otherUser->getMorphClass(),
+            'participant_id' => $otherUser->id,
+            'title' => 'Other Conversation',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ],
+        [
+            'id' => 'conversation-4',
+            'participant_type' => 'admin',
+            'participant_id' => $user->id,
+            'title' => 'Colliding Admin Conversation',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ],
+    ]);
+
+    $conversations = $user->conversations()->latest('updated_at')->get();
+
+    expect($conversations)->toHaveCount(2)
+        ->and($conversations->pluck('id')->all())->toEqual(['conversation-2', 'conversation-1'])
+        ->and($conversations->first())->toBeInstanceOf(Conversation::class);
+});
+
+test('conversation can retrieve messages using relationship', function (): void {
+    $user = ConversationRelationshipUser::create(['name' => 'Taylor']);
+
+    $conversation = Conversation::create([
+        'id' => 'conversation-1',
+        'participant_type' => $user->getMorphClass(),
+        'participant_id' => $user->id,
+        'title' => 'Conversation',
+    ]);
+
+    DB::table('agent_conversation_messages')->insert([
+        [
+            'id' => 'message-1',
+            'conversation_id' => $conversation->id,
+            'participant_type' => $user->getMorphClass(),
+            'participant_id' => $user->id,
+            'agent' => 'Agent',
+            'role' => 'user',
+            'content' => 'Hello',
+            'attachments' => '[]',
+            'tool_calls' => '[]',
+            'tool_results' => '[]',
+            'usage' => '[]',
+            'meta' => '[]',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ],
+    ]);
+
+    expect($conversation->messages)->toHaveCount(1)
+        ->and($conversation->messages->first()->content)->toBe('Hello')
+        ->and($conversation->messages->first()->attachments)->toBeArray();
+});
+
+test('conversation can retrieve its participant using relationship', function (): void {
+    $user = ConversationRelationshipUser::create(['name' => 'Taylor']);
+
+    $conversation = Conversation::create([
+        'id' => 'conversation-1',
+        'participant_type' => $user->getMorphClass(),
+        'participant_id' => $user->id,
+        'title' => 'Conversation',
+    ]);
+
+    expect($conversation->participant)->toBeInstanceOf(ConversationRelationshipUser::class)
+        ->and($conversation->participant->is($user))->toBeTrue();
+});
+
+test('conversation model uses configured database connection', function (): void {
+    config(['database.connections.secondary' => [
+        'driver' => 'sqlite',
+        'database' => ':memory:',
+        'prefix' => '',
+        'foreign_key_constraints' => true,
+    ]]);
+
+    Schema::connection('secondary')->create('agent_conversations', function (Blueprint $table): void {
+        $table->string('id', 36)->primary();
+        $table->string('participant_type');
+        $table->string('participant_id');
+        $table->string('title');
+        $table->timestamps();
+    });
+
+    config(['ai.conversations.connection' => 'secondary']);
+
+    DB::connection('secondary')->table('agent_conversations')->insert([
+        'id' => 'secondary-conversation-1',
+        'participant_type' => ConversationRelationshipUser::class,
+        'participant_id' => 1,
+        'title' => 'On Secondary DB',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $conversation = Conversation::find('secondary-conversation-1');
+
+    expect($conversation)->not->toBeNull()
+        ->and($conversation->title)->toBe('On Secondary DB')
+        ->and(DB::table('agent_conversations')->where('id', 'secondary-conversation-1')->exists())->toBeFalse();
+})->after(function (): void {
+    config(['ai.conversations.connection' => null]);
+});
+
+class ConversationRelationshipUser extends Model
+{
+    use HasConversations;
+
+    protected $table = 'users';
+
+    protected $guarded = [];
+}

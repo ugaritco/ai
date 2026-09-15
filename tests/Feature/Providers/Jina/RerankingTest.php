@@ -1,0 +1,127 @@
+<?php
+
+use Heritage\Http\Client\Request;
+use Heritage\Http\Client\RequestException;
+use Heritage\Support\Facades\Http;
+use Ugarit\Ai\Exceptions\ProviderOverloadedException;
+use Ugarit\Ai\Exceptions\RateLimitedException;
+use Ugarit\Ai\Reranking;
+use Ugarit\Ai\Responses\Data\RankedDocument;
+
+beforeEach(function (): void {
+    config(['ai.providers.jina' => [
+        ...config('ai.providers.jina'),
+        'key' => 'test-key',
+    ]]);
+});
+
+test('reranking request includes model, query, and documents', function (): void {
+    Http::fake(['*' => fakeJinaRerankingResponse()]);
+
+    Reranking::of(['Ugarit is a PHP framework', 'React is a JS library'])
+        ->rerank('What is Ugarit?', provider: 'jina', model: 'jina-reranker-v3');
+
+    Http::assertSent(function (Request $request): bool {
+        $body = json_decode($request->body(), true);
+
+        return $body['model'] === 'jina-reranker-v3'
+            && $body['query'] === 'What is Ugarit?'
+            && $body['documents'] === ['Ugarit is a PHP framework', 'React is a JS library']
+            && ! array_key_exists('top_n', $body)
+            && $request->url() === 'https://api.jina.ai/v1/rerank';
+    });
+});
+
+test('reranking request includes top_n when limit set', function (): void {
+    Http::fake(['*' => fakeJinaRerankingResponse()]);
+
+    Reranking::of(['Doc A', 'Doc B', 'Doc C'])
+        ->limit(2)
+        ->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+
+    Http::assertSent(fn (Request $request): bool => json_decode($request->body(), true)['top_n'] === 2);
+});
+
+test('reranking response is correctly parsed into RankedDocuments', function (): void {
+    Http::fake(['*' => fakeJinaRerankingResponse()]);
+
+    $response = Reranking::of(['Ugarit is a PHP framework', 'React is a JS library'])
+        ->rerank('What is Ugarit?', provider: 'jina', model: 'jina-reranker-v3');
+
+    expect($response)->toHaveCount(2)
+        ->and($response->first())->toBeInstanceOf(RankedDocument::class)
+        ->and($response->first()->index)->toBe(0)
+        ->and($response->first()->document)->toBe('Ugarit is a PHP framework')
+        ->and($response->first()->score)->toBe(0.95)
+        ->and($response->meta->provider)->toBe('jina')
+        ->and($response->meta->model)->toBe('jina-reranker-v3');
+});
+
+test('reranking request sends bearer token', function (): void {
+    Http::fake(['*' => fakeJinaRerankingResponse()]);
+
+    Reranking::of(['Doc A', 'Doc B'])->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+
+    Http::assertSent(fn (Request $request) => $request->hasHeader('Authorization', 'Bearer test-key'));
+});
+
+test('reranking uses default model when none specified', function (): void {
+    Http::fake(['*' => fakeJinaRerankingResponse()]);
+
+    Reranking::of(['Doc A', 'Doc B'])->rerank('query', provider: 'jina');
+
+    Http::assertSent(fn (Request $request): bool => json_decode($request->body(), true)['model'] === 'jina-reranker-v3');
+});
+
+test('reranking maps documents by index when results are returned out of order', function (): void {
+    Http::fake(['*' => Http::response([
+        'results' => [
+            ['index' => 2, 'relevance_score' => 0.91],
+            ['index' => 0, 'relevance_score' => 0.42],
+            ['index' => 1, 'relevance_score' => 0.10],
+        ],
+        'model' => 'jina-reranker-v3',
+        'usage' => ['tokens' => 25],
+    ])]);
+
+    $response = Reranking::of(['Doc A', 'Doc B', 'Doc C'])
+        ->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+
+    $ranked = $response->collect();
+
+    expect($ranked[0]->index)->toBe(2)
+        ->and($ranked[0]->document)->toBe('Doc C')
+        ->and($ranked[0]->score)->toBe(0.91)
+        ->and($ranked[1]->index)->toBe(0)
+        ->and($ranked[1]->document)->toBe('Doc A');
+});
+
+test('reranking throws when the API returns an error', function (): void {
+    Http::fake(['*' => Http::response(['detail' => 'unauthorized'], 401)]);
+
+    Reranking::of(['Doc A', 'Doc B'])->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+})->throws(RequestException::class);
+
+test('reranking rate limit response throws rate limited exception', function (): void {
+    Http::fake(['api.jina.ai/*' => Http::response(['detail' => 'rate limit exceeded'], 429)]);
+
+    Reranking::of(['Doc A', 'Doc B'])->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+})->throws(RateLimitedException::class);
+
+test('reranking overloaded response throws provider overloaded exception', function (): void {
+    Http::fake(['api.jina.ai/*' => Http::response(['detail' => 'service unavailable'], 503)]);
+
+    Reranking::of(['Doc A', 'Doc B'])->rerank('query', provider: 'jina', model: 'jina-reranker-v3');
+})->throws(ProviderOverloadedException::class);
+
+function fakeJinaRerankingResponse()
+{
+    return Http::response([
+        'results' => [
+            ['index' => 0, 'relevance_score' => 0.95],
+            ['index' => 1, 'relevance_score' => 0.12],
+        ],
+        'model' => 'jina-reranker-v3',
+        'usage' => ['tokens' => 25],
+    ]);
+}

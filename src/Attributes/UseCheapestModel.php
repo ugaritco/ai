@@ -1,0 +1,11 @@
+<?php
+
+namespace Ugarit\Ai\Attributes;
+
+use Attribute;
+
+#[Attribute(Attribute::TARGET_CLASS)]
+class UseCheapestModel
+{
+    //
+}

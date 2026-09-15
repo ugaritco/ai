@@ -1,0 +1,68 @@
+<?php
+
+use Heritage\Http\Client\RequestException;
+use Heritage\Support\Facades\Http;
+use Ugarit\Ai\Exceptions\AiException;
+use Ugarit\Ai\Exceptions\ProviderOverloadedException;
+use Ugarit\Ai\Exceptions\RateLimitedException;
+use Tests\Fixtures\Agents\AssistantAgent;
+
+beforeEach(function (): void {
+    config(['ai.providers.ollama' => [
+        ...config('ai.providers.ollama'),
+        'key' => '',
+        'url' => 'http://localhost:11434',
+    ]]);
+});
+
+test('http error response throws request exception', function (): void {
+    Http::fake([
+        'localhost:11434/*' => Http::response([
+            'error' => 'model not found',
+        ], 400),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'Hi',
+        provider: 'ollama',
+    );
+})->throws(RequestException::class);
+
+test('rate limit response throws rate limited exception', function (): void {
+    Http::fake([
+        'localhost:11434/*' => Http::response([
+            'error' => 'rate limit exceeded',
+        ], 429),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'Hi',
+        provider: 'ollama',
+    );
+})->throws(RateLimitedException::class);
+
+test('overloaded response throws provider overloaded exception', function (): void {
+    Http::fake([
+        'localhost:11434/*' => Http::response([
+            'error' => 'server overloaded',
+        ], 503),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'Hi',
+        provider: 'ollama',
+    );
+})->throws(ProviderOverloadedException::class);
+
+test('error in 200 response throws ai exception', function (): void {
+    Http::fake([
+        'localhost:11434/*' => Http::response([
+            'error' => 'model "unknown-model" not found',
+        ], 200),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'Hi',
+        provider: 'ollama',
+    );
+})->throws(AiException::class, 'Ollama Error');

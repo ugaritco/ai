@@ -1,0 +1,354 @@
+<?php
+
+use Heritage\Support\Collection;
+use Heritage\Support\Facades\Http;
+use Heritage\Support\Facades\Storage;
+use Ugarit\Ai\Contracts\Agent;
+use Ugarit\Ai\Contracts\Conversational;
+use Ugarit\Ai\Files;
+use Ugarit\Ai\Files\Base64Document;
+use Ugarit\Ai\Files\Base64Video;
+use Ugarit\Ai\Files\LocalImage;
+use Ugarit\Ai\Files\RemoteAudio;
+use Ugarit\Ai\Files\RemoteDocument;
+use Ugarit\Ai\Files\RemoteImage;
+use Ugarit\Ai\Messages\AssistantMessage;
+use Ugarit\Ai\Messages\Message;
+use Ugarit\Ai\Messages\ToolResultMessage;
+use Ugarit\Ai\Promptable;
+use Ugarit\Ai\Responses\Data\ToolCall;
+use Ugarit\Ai\Responses\Data\ToolResult;
+use Tests\Fixtures\Agents\AssistantAgent;
+
+use function Ugarit\Ai\agent;
+
+test('user message maps to gemini format', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse(),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'What is Ugarit?',
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $contents = $request->data()['contents'];
+        $userMessage = $contents[0];
+
+        return $userMessage['role'] === 'user'
+            && $userMessage['parts'][0]['text'] === 'What is Ugarit?';
+    });
+});
+
+test('tool result follow up maps model and function response', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('The number is 72019'),
+    ]);
+
+    $agent = new class implements Agent, Conversational
+    {
+        use Promptable;
+
+        public function instructions(): string
+        {
+            return 'You are a helpful assistant.';
+        }
+
+        public function messages(): iterable
+        {
+            // Use non-sequential keys to ensure parts serialize as a JSON array
+            $toolResults = collect([
+                'custom_key' => new ToolResult('call_123', 'FixedNumberGenerator', [], 123),
+            ]);
+
+            return [
+                new Message(role: 'user', content: 'Generate a number'),
+                new AssistantMessage('', collect([
+                    new ToolCall('call_123', 'FixedNumberGenerator', [], 'call_123'),
+                ])),
+                new ToolResultMessage($toolResults),
+            ];
+        }
+    };
+
+    $agent->prompt('Follow up', provider: 'gemini');
+
+    $recorded = Http::recorded();
+
+    expect($recorded)->toHaveCount(1);
+
+    $contents = $recorded[0][0]->data()['contents'];
+
+    $modelFunctionCall = null;
+    $userMessageParts = null;
+
+    foreach ($contents as $content) {
+        if ($content['role'] === 'model') {
+            foreach ($content['parts'] ?? [] as $part) {
+                if (isset($part['functionCall'])) {
+                    $modelFunctionCall = $part['functionCall'];
+                }
+            }
+        }
+
+        if ($content['role'] === 'user') {
+            foreach ($content['parts'] ?? [] as $part) {
+                if (isset($part['functionResponse'])) {
+                    $userMessageParts = $content['parts'];
+                }
+            }
+        }
+    }
+
+    expect($modelFunctionCall)->not->toBeNull('Follow-up should include model message with functionCall')
+        ->and($modelFunctionCall)->not->toHaveKey('args')
+        ->and($modelFunctionCall)->not->toHaveKey('id')
+        ->and($userMessageParts)->not->toBeNull('Follow-up should include user message with functionResponse')
+        ->and(array_is_list($userMessageParts))->toBeTrue('Tool result parts must be a sequential array');
+});
+
+test('prior assistant tool call with empty arguments omits args in conversation history', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('OK'),
+    ]);
+
+    $agent = new class implements Agent, Conversational
+    {
+        use Promptable;
+
+        public function instructions(): string
+        {
+            return 'You are a helpful assistant.';
+        }
+
+        public function messages(): iterable
+        {
+            return [
+                new Message(role: 'user', content: 'Generate a number'),
+                new AssistantMessage('', new Collection([
+                    new ToolCall('call_123', 'FixedNumberGenerator', [], 'call_123'),
+                ])),
+            ];
+        }
+    };
+
+    $agent->prompt('And again', provider: 'gemini');
+
+    Http::assertSent(function ($request): bool {
+        $modelFunctionCall = collect($request->data()['contents'])
+            ->where('role', 'model')
+            ->flatMap(fn ($content) => $content['parts'] ?? [])
+            ->firstWhere(fn ($part): bool => isset($part['functionCall']))['functionCall'] ?? null;
+
+        return $modelFunctionCall !== null
+            && ! array_key_exists('args', $modelFunctionCall);
+    });
+});
+
+test('local image attachment without explicit mime type detects mime from file', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I see an image'),
+    ]);
+
+    agent('You are helpful.')->prompt(
+        'What is in this image?',
+        attachments: [new LocalImage(__DIR__.'/../../../Fixtures/Images/red.png')],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = $request->data()['contents'][0]['parts'];
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'image/png';
+            }
+        }
+
+        return false;
+    });
+});
+
+test('base64 pdf document maps to inline data', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I see a PDF'),
+    ]);
+
+    $pdf = new Base64Document(base64_encode('fake-pdf-content'), 'application/pdf');
+
+    agent('You are helpful.')->prompt(
+        'What is in this PDF?',
+        attachments: [$pdf],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = $request->data()['contents'][0]['parts'];
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'application/pdf'
+                    && $part['inlineData']['data'] === base64_encode('fake-pdf-content');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('base64 video attachment maps to inline data', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I see a video'),
+    ]);
+
+    $video = new Base64Video(base64_encode('fake-video-content'), 'video/mp4');
+
+    agent('You are helpful.')->prompt(
+        'What is in this video?',
+        attachments: [$video],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = $request->data()['contents'][0]['parts'];
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'video/mp4'
+                    && $part['inlineData']['data'] === base64_encode('fake-video-content');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('remote image url is fetched and mapped to inline data', function (): void {
+    Http::fake([
+        'example.com/*' => Http::response('fake-image-bytes', 200, ['Content-Type' => 'image/png']),
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I see an image'),
+    ]);
+
+    agent('You are helpful.')->prompt(
+        'What is in this image?',
+        attachments: [new RemoteImage('https://example.com/photo.png', 'image/png')],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = data_get($request->data(), 'contents.0.parts', []);
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'image/png'
+                    && $part['inlineData']['data'] === base64_encode('fake-image-bytes');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('remote pdf url is fetched and mapped to inline data', function (): void {
+    Http::fake([
+        'example.com/*' => Http::response('fake-pdf-bytes', 200, ['Content-Type' => 'application/pdf']),
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I see a PDF'),
+    ]);
+
+    agent('You are helpful.')->prompt(
+        'What is in this PDF?',
+        attachments: [new RemoteDocument('https://example.com/report.pdf', 'application/pdf')],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = data_get($request->data(), 'contents.0.parts', []);
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'application/pdf'
+                    && $part['inlineData']['data'] === base64_encode('fake-pdf-bytes');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('remote audio url is fetched and mapped to inline data', function (): void {
+    Http::fake([
+        'example.com/*' => Http::response('fake-audio-bytes', 200, ['Content-Type' => 'audio/mp3']),
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse('I hear audio'),
+    ]);
+
+    agent('You are helpful.')->prompt(
+        'What is in this audio?',
+        attachments: [new RemoteAudio('https://example.com/clip.mp3', 'audio/mp3')],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = data_get($request->data(), 'contents.0.parts', []);
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'audio/mp3'
+                    && $part['inlineData']['data'] === base64_encode('fake-audio-bytes');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('stored text document sends real mime type', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse(),
+    ]);
+
+    Storage::fake('docs');
+    Storage::disk('docs')->put('notes.txt', 'stored text contents');
+
+    agent('You are helpful.')->prompt(
+        'Read this.',
+        attachments: [Files\Document::fromStorage('notes.txt', 'docs')],
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $parts = $request->data()['contents'][0]['parts'];
+
+        foreach ($parts as $part) {
+            if (isset($part['inlineData'])) {
+                return $part['inlineData']['mimeType'] === 'text/plain'
+                    && $part['inlineData']['data'] === base64_encode('stored text contents');
+            }
+        }
+
+        return false;
+    });
+});
+
+test('system instructions are not in contents array', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => $this->fakeTextResponse(),
+    ]);
+
+    (new AssistantAgent)->prompt(
+        'Hi',
+        provider: 'gemini',
+    );
+
+    Http::assertSent(function ($request): bool {
+        $body = $request->data();
+
+        foreach ($body['contents'] as $content) {
+            if ($content['role'] === 'system') {
+                return false;
+            }
+        }
+
+        return isset($body['system_instruction']);
+    });
+});

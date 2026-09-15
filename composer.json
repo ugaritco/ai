@@ -1,0 +1,117 @@
+{
+    "name": "ugarit/ai",
+    "description": "The official AI SDK for Ugarit.",
+    "license": "MIT",
+    "keywords": [
+        "ugarit",
+        "ai"
+    ],
+    "homepage": "https://github.com/ugarit/ai",
+    "support": {
+        "issues": "https://github.com/ugarit/ai/issues",
+        "source": "https://github.com/ugarit/ai"
+    },
+    "require": {
+        "php": "^8.3",
+        "aws/aws-sdk-php": "^3.369.1",
+        "heritage/console": "^1.00.00",
+        "heritage/container": "^1.00.00",
+        "heritage/contracts": "^1.00.00",
+        "heritage/database": "^1.00.00",
+        "heritage/filesystem": "^1.00.00",
+        "heritage/json-schema": "^1.00.00",
+        "heritage/support": "^1.00.00",
+        "ugarit/prompts": "^1.00.00",
+        "ugarit/serializable-closure": "^1.00.00"
+    },
+    "require-dev": {
+        "driftingly/rector-ugarit": "^2.5",
+        "ugarit/mcp": "^1.00.00",
+        "ugarit/pint": "^1.00.00",
+        "mockery/mockery": "^1.6.12",
+        "orchestra/testbench": "^10.6|^11.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-ugarit": "^3.0|^4.0",
+        "phpstan/phpstan": "^2.1",
+        "rector/rector": "^2.5"
+    },
+    "suggest": {
+        "ugarit/mcp": "Required to use MCP client tools or MCP server tools with Ugarit AI agents."
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": {
+            "Ugarit\\Ai\\": "src/"
+        },
+        "files": [
+            "functions.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/",
+            "Workbench\\App\\": "workbench/app/",
+            "Workbench\\Database\\Factories\\": "workbench/database/factories/",
+            "Workbench\\Database\\Seeders\\": "workbench/database/seeders/"
+        }
+    },
+    "scripts": {
+        "lint": [
+            "pint --format agent",
+            "phpstan --memory-limit=-1"
+        ],
+        "test": "pest --parallel",
+        "test:lint": "pint --test --format agent",
+        "test:types": "phpstan",
+        "check": [
+            "@composer lint",
+            "@composer test"
+        ],
+        "post-autoload-dump": [
+            "@clear",
+            "@prepare"
+        ],
+        "clear": "@php vendor/bin/testbench package:purge-skeleton --ansi",
+        "prepare": "@php vendor/bin/testbench package:discover --ansi",
+        "build": [
+            "@php vendor/bin/testbench workbench:build --ansi",
+            "npm --prefix workbench run build",
+            "@php vendor/bin/testbench workbench:sync-skeleton --ansi"
+        ],
+        "serve": [
+            "Composer\\Config::disableProcessTimeout",
+            "@build",
+            "@php vendor/bin/testbench serve --ansi"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-master": "1.x-dev"
+        },
+        "ugarit": {
+            "providers": [
+                "Ugarit\\Ai\\AiServiceProvider"
+            ]
+        }
+    },
+    "authors": [
+        {
+            "name": "Muath R Abu Ouda",
+            "email": "muathrabuouda@hotmail.com",
+            "role": "Vision Leader of Ugarit"
+        },
+        {
+            "name": "Taylor Otwell",
+            "email": "taylor@laravel.com",
+            "role": "Original Creator & Primary Developer"
+        }
+    ],
+    "version": "1.00.00"
+}
